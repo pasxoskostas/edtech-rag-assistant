@@ -1,51 +1,60 @@
+from fastapi import FastAPI
 from pydantic import BaseModel, Field
 
+app = FastAPI(title="EdTech RAG Assistant API")
 
+
+# --- Pydantic Models ---
 class QuizQuestion(BaseModel):
     question: str = Field(description="Η εκφώνηση της ερώτησης")
-    options: list[str] = Field(
-        min_length=4, max_length=4, description="4 πιθανές απαντήσεις"
-    )
-    correct_index: int = Field(
-        ge=0, le=3, description="Ο δείκτης (0-3) της σωστής απάντησης"
-    )
-    explanation: str = Field(
-        description="Σύντομη αιτιολόγηση της σωστής απάντησης"
-    )
+    options: list[str] = Field(min_length=4, max_length=4)
+    correct_index: int = Field(ge=0, le=3)
+    explanation: str
 
 
-# Νέο μοντέλο που περιέχει λίστα από QuizQuestion
 class QuizSet(BaseModel):
-    topic: str = Field(description="Το θέμα του διαγωνίσματος")
-    questions: list[QuizQuestion] = Field(
-        min_length=1, description="Λίστα ερωτήσεων"
+    topic: str
+    questions: list[QuizQuestion]
+
+
+# Νέο μοντέλο για τα δεδομένα που στέλνει ο χρήστης (Request)
+class TopicRequest(BaseModel):
+    topic: str = Field(min_length=3, description="Το θέμα του μαθήματος")
+    num_questions: int = Field(default=2, ge=1, le=5)
+
+
+# --- Endpoints ---
+@app.get("/")
+def home() -> dict[str, str]:
+    return {"message": "Ο server του EdTech Assistant λειτουργεί!"}
+
+
+@app.get("/sample-quiz", response_model=QuizSet)
+def get_sample_quiz() -> QuizSet:
+    return QuizSet(
+        topic="Αλγόριθμοι",
+        questions=[
+            QuizQuestion(
+                question="Ποια δομή δεδομένων ακολουθεί την αρχή LIFO;",
+                options=["Ουρά", "Στοίβα", "Δέντρο", "Γράφος"],
+                correct_index=1,
+                explanation="Last-In, First-Out (Τελευταίο μέσα, πρώτο έξω).",
+            )
+        ],
     )
 
 
-def main() -> None:
-    raw_quiz_set = {
-        "topic": "Αλγόριθμοι & Πολυπλοκότητα",
-        "questions": [
-            {
-                "question": "Ποια είναι η χρονική πολυπλοκότητα της δυαδικής αναζήτησης;",
-                "options": ["O(n)", "O(log n)", "O(n^2)", "O(1)"],
-                "correct_index": 1,
-                "explanation": "Σε κάθε βήμα το εύρος αναζήτησης υποδιπλασιάζεται.",
-            },
-            {
-                "question": "Ποια δομή δεδομένων ακολουθεί την αρχή LIFO;",
-                "options": ["Ουρά (Queue)", "Στοίβα (Stack)", "Δέντρο", "Γράφος"],
-                "correct_index": 1,
-                "explanation": "Last-In, First-Out (Τελευταίο μέσα, πρώτο έξω).",
-            },
-        ],
-    }
-
-    quiz = QuizSet(**raw_quiz_set)
-    print(f"Θέμα: {quiz.topic} ({len(quiz.questions)} ερωτήσεις)")
-    for i, q in enumerate(quiz.questions, start=1):
-        print(f"{i}. {q.question} -> {q.options[q.correct_index]}")
-
-
-if __name__ == "__main__":
-    main()
+# Νέο POST endpoint: δέχεται TopicRequest και επιστρέφει QuizSet
+@app.post("/generate-quiz", response_model=QuizSet)
+def generate_quiz(request: TopicRequest) -> QuizSet:
+    # Προσωρινές ερωτήσεις (στην 3η εβδομάδα εδώ θα μπει το Ollama/AI)
+    questions = [
+        QuizQuestion(
+            question=f"Ερώτηση {i + 1} για το θέμα: {request.topic}",
+            options=["Επιλογή Α", "Επιλογή Β", "Επιλογή Γ", "Επιλογή Δ"],
+            correct_index=0,
+            explanation="Προσωρινή αιτιολόγηση.",
+        )
+        for i in range(request.num_questions)
+    ]
+    return QuizSet(topic=request.topic, questions=questions)
