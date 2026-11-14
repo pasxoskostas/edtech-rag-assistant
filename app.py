@@ -41,10 +41,17 @@ def build_quiz_markdown(quiz: dict) -> str:
     return "\n".join(lines)
 
 
+# --- Αρχικοποίηση Session State ---
 if "quiz_data" not in st.session_state:
     st.session_state["quiz_data"] = None
 if "selected_source" not in st.session_state:
     st.session_state["selected_source"] = "Όλα τα αρχεία"
+if "quiz_submitted" not in st.session_state:
+    st.session_state["quiz_submitted"] = False
+if "submitted_answers" not in st.session_state:
+    st.session_state["submitted_answers"] = []
+if "tutor_explanations" not in st.session_state:
+    st.session_state["tutor_explanations"] = {}
 
 # --- Πλαϊνή Μπάρα: Ανέβασμα Νέας Ύλης ---
 with st.sidebar:
@@ -133,6 +140,9 @@ if st.button("Δημιουργία Κουίζ"):
             )
             if response.status_code == 200:
                 st.session_state["quiz_data"] = response.json()
+                st.session_state["quiz_submitted"] = False
+                st.session_state["submitted_answers"] = []
+                st.session_state["tutor_explanations"] = {}
                 for key in list(st.session_state.keys()):
                     if key.startswith("q_"):
                         del st.session_state[key]
@@ -165,7 +175,12 @@ if quiz:
 
         submitted = st.form_submit_button("Υποβολή Απαντήσεων")
 
-    # --- Κουμπιά Εξαγωγής Αρχείου (εκτός φόρμας) ---
+    if submitted:
+        st.session_state["quiz_submitted"] = True
+        st.session_state["submitted_answers"] = user_answers
+        st.session_state["tutor_explanations"] = {}
+
+    # --- Κουμπιά Εξαγωγής Αρχείου ---
     col1, col2 = st.columns(2)
     with col1:
         st.download_button(
@@ -184,12 +199,15 @@ if quiz:
             use_container_width=True,
         )
 
-    if submitted:
+    # --- Βαθμολόγηση & Διαδραστικός AI Tutor ---
+    if st.session_state["quiz_submitted"]:
+        saved_answers = st.session_state["submitted_answers"]
         score = 0
         st.divider()
+
         for i, q in enumerate(quiz["questions"]):
             correct_answer = q["options"][q["correct_index"]]
-            user_answer = user_answers[i]
+            user_answer = saved_answers[i] if i < len(saved_answers) else None
 
             if user_answer == correct_answer:
                 score += 1
@@ -197,17 +215,54 @@ if quiz:
                     f"**Ερώτηση {i + 1}: Σωστό!** ({correct_answer})\n\n"
                     f"💡 *{q['explanation']}*"
                 )
-            elif user_answer is None:
-                st.warning(
-                    f"**Ερώτηση {i + 1}: Δεν απαντήθηκε.** "
-                    f"Σωστή απάντηση: **{correct_answer}**\n\n"
-                    f"💡 *{q['explanation']}*"
-                )
             else:
-                st.error(
-                    f"**Ερώτηση {i + 1}: Λάθος.** Επέλεξες: *{user_answer}* | "
-                    f"Σωστή: **{correct_answer}**\n\n"
-                    f"💡 *{q['explanation']}*"
-                )
+                if user_answer is None:
+                    st.warning(
+                        f"**Ερώτηση {i + 1}: Δεν απαντήθηκε.** "
+                        f"Σωστή απάντηση: **{correct_answer}**\n\n"
+                        f"💡 *{q['explanation']}*"
+                    )
+                else:
+                    st.error(
+                        f"**Ερώτηση {i + 1}: Λάθος.** Επέλεξες: *{user_answer}* | "
+                        f"Σωστή: **{correct_answer}**\n\n"
+                        f"💡 *{q['explanation']}*"
+                    )
+
+                # Έλεγχος αν υπάρχει ήδη ανάλυση από τον AI Tutor
+                if i in st.session_state["tutor_explanations"]:
+                    tutor_data = st.session_state["tutor_explanations"][i]
+                    with st.chat_message("assistant"):
+                        st.markdown(f"**🧑‍🏫 Ανάλυση AI Tutor:**\n\n{tutor_data['explanation']}")
+                        if tutor_data.get("sources"):
+                            st.caption(f"📚 Βάσει πηγών: {', '.join(tutor_data['sources'])}")
+                else:
+                    if st.button(
+                        "🧑‍🏫 Εξήγησέ μου το λάθος αναλυτικά",
+                        key=f"tutor_btn_{i}",
+                    ):
+                        with st.spinner("Ο AI Tutor ανατρέχει στις σημειώσεις σου..."):
+                            try:
+                                explain_res = requests.post(
+                                    f"{API_BASE}/explain-mistake",
+                                    json={
+                                        "question": q["question"],
+                                        "user_answer": user_answer or "Καμία απάντηση",
+                                        "correct_answer": correct_answer,
+                                        "source_filter": st.session_state["selected_source"],
+                                    },
+                                    timeout=60,
+                                )
+                                if explain_res.status_code == 200:
+                                    st.session_state["tutor_explanations"][i] = explain_res.json()
+                                    st.rerun()
+                                else:
+                                    st.error(
+                                        f"Σφάλμα AI Tutor ({explain_res.status_code}): {explain_res.text}"
+                                    )
+                            except requests.exceptions.ConnectionError:
+                                st.error("Δεν βρέθηκε ενεργός FastAPI server.")
+                            except requests.exceptions.ReadTimeout:
+                                st.error("Ο AI Tutor άργησε να απαντήσει (Timeout 60s).")
 
         st.info(f"🎯 **Τελική Βαθμολογία: {score} / {len(quiz['questions'])}**")
