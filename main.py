@@ -17,7 +17,8 @@ load_dotenv()
 
 app = FastAPI(title="EdTech RAG Assistant API")
 
-chroma_client = chromadb.PersistentClient(path="./chroma_db")
+CHROMA_DB_PATH = os.getenv("CHROMA_DB_PATH", "./chroma_db")
+chroma_client = chromadb.PersistentClient(path=CHROMA_DB_PATH)
 collection = chroma_client.get_or_create_collection(name="edtech_notes")
 gemini_client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
@@ -112,6 +113,38 @@ def list_documents() -> dict[str, list[str]]:
         if isinstance(meta, dict) and "source" in meta
     }
     return {"documents": sorted(sources)}
+
+
+@app.delete("/documents/{filename:path}")
+def delete_document(filename: str) -> dict:
+    try:
+        existing = collection.get(where={"source": filename})
+        existing_ids = existing.get("ids") or []
+        if not existing_ids:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Το αρχείο '{filename}' δεν βρέθηκε στη βάση.",
+            )
+
+        collection.delete(where={"source": filename})
+        remaining = collection.count()
+        print(
+            f"[DELETE] Διαγράφηκε το '{filename}' ({len(existing_ids)} chunks). Απομένουν: {remaining}",
+            flush=True,
+        )
+        return {
+            "deleted_filename": filename,
+            "chunks_deleted": len(existing_ids),
+            "total_chunks_in_db": remaining,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[DELETE ERROR] {e}", flush=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Σφάλμα κατά τη διαγραφή του αρχείου: {str(e)}",
+        )
 
 
 @app.post("/upload-document")

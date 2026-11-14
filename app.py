@@ -1,8 +1,11 @@
 import json
+import os
+from urllib.parse import quote
+
 import requests
 import streamlit as st
 
-API_BASE = "http://127.0.0.1:8000"
+API_BASE = os.getenv("API_BASE", "http://127.0.0.1:8000")
 
 st.set_page_config(
     page_title="EdTech RAG Assistant",
@@ -52,11 +55,26 @@ if "submitted_answers" not in st.session_state:
     st.session_state["submitted_answers"] = []
 if "tutor_explanations" not in st.session_state:
     st.session_state["tutor_explanations"] = {}
+if "sidebar_msg" not in st.session_state:
+    st.session_state["sidebar_msg"] = None
 
-# --- Πλαϊνή Μπάρα: Ανέβασμα Νέας Ύλης ---
+# --- Ανάκτηση διαθέσιμων αρχείων από το Backend ---
+indexed_docs = []
+try:
+    docs_res = requests.get(f"{API_BASE}/documents", timeout=5)
+    if docs_res.status_code == 200:
+        indexed_docs = docs_res.json().get("documents", [])
+except Exception:
+    pass
+
+# --- Πλαϊνή Μπάρα: Ανέβασμα & Διαγραφή Ύλης ---
 with st.sidebar:
     st.header("📚 Υλικό Μαθήματος")
     st.write("Ανέβασε σημειώσεις (PDF ή TXT) για να εμπλουτίσεις τη βάση γνώσης.")
+
+    if st.session_state["sidebar_msg"]:
+        st.success(st.session_state["sidebar_msg"])
+        st.session_state["sidebar_msg"] = None
 
     uploaded_file = st.file_uploader(
         "Επίλεξε αρχείο:",
@@ -82,11 +100,12 @@ with st.sidebar:
                     if res.status_code == 200:
                         data = res.json()
                         st.session_state["selected_source"] = data["filename"]
-                        st.success(
+                        st.session_state["sidebar_msg"] = (
                             f"Το αρχείο **{data['filename']}** αποθηκεύτηκε!\n\n"
-                            f"• Νέα κομμάτια (chunks): **{data['chunks_added']}**\n"
+                            f"• Νέα chunks: **{data['chunks_added']}**\n"
                             f"• Σύνολο στη βάση: **{data['total_chunks_in_db']}**"
                         )
+                        st.rerun()
                     else:
                         st.error(f"Σφάλμα ({res.status_code}): {res.text}")
                 except requests.exceptions.ConnectionError:
@@ -94,15 +113,39 @@ with st.sidebar:
                 except requests.exceptions.ReadTimeout:
                     st.error("Η επεξεργασία άργησε (Timeout 180s).")
 
-# --- Ανάκτηση διαθέσιμων αρχείων από το Backend ---
-available_docs = ["Όλα τα αρχεία"]
-try:
-    docs_res = requests.get(f"{API_BASE}/documents", timeout=5)
-    if docs_res.status_code == 200:
-        available_docs.extend(docs_res.json().get("documents", []))
-except Exception:
-    pass
+    st.divider()
+    st.subheader("🗂️ Αποθηκευμένα Αρχεία")
+    if not indexed_docs:
+        st.caption("Δεν υπάρχουν ανεβασμένα αρχεία στη βάση.")
+    else:
+        doc_to_delete = st.selectbox(
+            "Διαχείριση αρχείων:",
+            options=indexed_docs,
+            key="doc_to_delete",
+        )
+        if st.button("🗑️ Διαγραφή Αρχείου"):
+            with st.spinner(f"Διαγραφή '{doc_to_delete}'..."):
+                try:
+                    encoded_name = quote(doc_to_delete, safe="")
+                    del_res = requests.delete(
+                        f"{API_BASE}/documents/{encoded_name}",
+                        timeout=30,
+                    )
+                    if del_res.status_code == 200:
+                        del_data = del_res.json()
+                        if st.session_state["selected_source"] == doc_to_delete:
+                            st.session_state["selected_source"] = "Όλα τα αρχεία"
+                        st.session_state["sidebar_msg"] = (
+                            f"Διαγράφηκε το **{del_data['deleted_filename']}** "
+                            f"({del_data['chunks_deleted']} chunks)."
+                        )
+                        st.rerun()
+                    else:
+                        st.error(f"Σφάλμα ({del_res.status_code}): {del_res.text}")
+                except requests.exceptions.ConnectionError:
+                    st.error("Δεν βρέθηκε ενεργός FastAPI server.")
 
+available_docs = ["Όλα τα αρχεία"] + indexed_docs
 default_index = (
     available_docs.index(st.session_state["selected_source"])
     if st.session_state["selected_source"] in available_docs
@@ -229,7 +272,6 @@ if quiz:
                         f"💡 *{q['explanation']}*"
                     )
 
-                # Έλεγχος αν υπάρχει ήδη ανάλυση από τον AI Tutor
                 if i in st.session_state["tutor_explanations"]:
                     tutor_data = st.session_state["tutor_explanations"][i]
                     with st.chat_message("assistant"):
