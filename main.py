@@ -1,16 +1,31 @@
+import os
+import time
+
 import chromadb
 import ollama
+from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
+from google import genai
+from google.genai import types
+from google.genai.errors import APIError
 from pydantic import BaseModel, Field
+
+load_dotenv()
 
 app = FastAPI(title="EdTech RAG Assistant API")
 
-# Σύνδεση με την τοπική βάση ChromaDB που δημιουργήθηκε από το ingest.py
 chroma_client = chromadb.PersistentClient(path="./chroma_db")
 collection = chroma_client.get_or_create_collection(name="edtech_notes")
+gemini_client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+
+# Λίστα προτεραιότητας μοντέλων (Model Fallback για υψηλή διαθεσιμότητα)
+FALLBACK_MODELS = [
+    "gemini-3.5-flash-lite",
+    "gemini-2.5-flash-lite",
+    "gemini-3.7-flash",
+]
 
 
-# --- Pydantic Models ---
 class QuizQuestion(BaseModel):
     question: str = Field(description="Η εκφώνηση της ερώτησης στα ελληνικά")
     options: list[str] = Field(
@@ -34,7 +49,6 @@ class TopicRequest(BaseModel):
     num_questions: int = Field(default=2, ge=1, le=5)
 
 
-# --- Endpoints ---
 @app.get("/")
 def home() -> dict[str, str]:
     return {"message": "Ο RAG server του EdTech Assistant λειτουργεί!"}
@@ -42,16 +56,26 @@ def home() -> dict[str, str]:
 
 @app.post("/generate-quiz", response_model=QuizSet)
 def generate_quiz(request: TopicRequest) -> QuizSet:
+    if not os.getenv("GEMINI_API_KEY"):
+        raise HTTPException(
+            status_code=500, detail="Λείπει το GEMINI_API_KEY από το αρχείο .env."
+        )
+
     try:
-        # 1. RETRIEVAL: Μετατρέπουμε το θέμα αναζήτησης σε διάνυσμα και ψάχνουμε στη βάση
+        t0 = time.perf_counter()
+
+        # 1. Τοπικό Embedding
         query_embedding = ollama.embed(
             model="nomic-embed-text", input=request.topic
         ).embeddings[0]
+        print(f"[1/3] Embedding έτοιμο σε {time.perf_counter() - t0:.2f}s", flush=True)
 
+        # 2. Αναζήτηση στη ChromaDB
         results = collection.query(
             query_embeddings=[query_embedding],
-            n_results=1,  # Φέρνουμε τα 2 πιο σχετικά αποσπάσματα από τις σημειώσεις
+            n_results=2,
         )
+        print(f"[2/3] ChromaDB αναζήτηση σε {time.perf_counter() - t0:.2f}s", flush=True)
 
         retrieved_docs = results["documents"][0] if results["documents"] else []
         if not retrieved_docs:
@@ -61,34 +85,52 @@ def generate_quiz(request: TopicRequest) -> QuizSet:
 
         context = "\n\n".join(retrieved_docs)
 
-        # 2. AUGMENTED GENERATION: Δίνουμε στο LLM ΑΠΟΚΛΕΙΣΤΙΚΑ το κείμενο που βρέθηκε
+        # 3. Παραγωγή κουίζ με αυτόματο Fallback
         prompt = (
             f"Διάβασε προσεκτικά το παρακάτω εκπαιδευτικό κείμενο:\n"
             f"--- ΑΡΧΗ ΚΕΙΜΕΝΟΥ ---\n{context}\n--- ΤΕΛΟΣ ΚΕΙΜΕΝΟΥ ---\n\n"
             f"Βασιζόμενος ΑΠΟΚΛΕΙΣΤΙΚΑ και ΜΟΝΟ στις πληροφορίες του παραπάνω κειμένου, "
             f"δημιούργησε {request.num_questions} ερωτήσεις πολλαπλής επιλογής στα ελληνικά "
-            f"για το θέμα '{request.topic}'. Μην χρησιμοποιήσεις εξωτερικές γνώσεις."
+            f"για το θέμα '{request.topic}'."
         )
 
-        response = ollama.chat(
-            model="qwen2.5:3b",
-            messages=[
-                {
-                    "role": "system",
-                    "content": "Είσαι αυστηρός καθηγητής Πληροφορικής. Φτιάχνεις ερωτήσεις αποκλειστικά από το κείμενο που σου δίνεται, στα ελληνικά και σε μορφή JSON.",
-                },
-                {"role": "user", "content": prompt},
-            ],
-            format=QuizSet.model_json_schema(),
-            options={"temperature": 0.2},
-            keep_alive="10m"
-        )
+        last_error = None
+        for model_name in FALLBACK_MODELS:
+            try:
+                print(f"[3/3] Αποστολή στο {model_name}...", flush=True)
+                response = gemini_client.models.generate_content(
+                    model=model_name,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        system_instruction="Είσαι αυστηρός καθηγητής Πληροφορικής. Φτιάχνεις ερωτήσεις αποκλειστικά από το κείμενο που σου δίνεται, στα ελληνικά.",
+                        response_mime_type="application/json",
+                        response_schema=QuizSet,
+                        temperature=0.2,
+                    ),
+                )
+                print(
+                    f"[OK] Απάντησε το {model_name} σε {time.perf_counter() - t0:.2f}s",
+                    flush=True,
+                )
+                return QuizSet.model_validate_json(response.text)
 
-        return QuizSet.model_validate_json(response.message.content)
+            except APIError as e:
+                last_error = e
+                print(
+                    f"[WARN] Το {model_name} απέτυχε (HTTP {e.code}), δοκιμή επόμενου...",
+                    flush=True,
+                )
+                continue
+
+        raise HTTPException(
+            status_code=503,
+            detail=f"Όλα τα μοντέλα είναι προσωρινά μη διαθέσιμα: {last_error}",
+        )
 
     except HTTPException:
         raise
     except Exception as e:
+        print(f"[ERROR] {e}", flush=True)
         raise HTTPException(
             status_code=500,
             detail=f"Σφάλμα κατά την παραγωγή του κουίζ: {str(e)}",
