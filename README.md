@@ -127,3 +127,4 @@ Open two terminals in the project directory:
 - [x] **Phase 4:** Full-stack Streamlit web interface with automated grading
 - [ ] **Phase 5:** Dynamic PDF & TXT document upload via Streamlit sidebar with overlapping text chunking
 - [ ] **Phase 6:** Source citations per question & quiz export
+- [x] **Phase 7:** Quiz export (Markdown/JSON) & whole-document sampling
